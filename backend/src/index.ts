@@ -2,8 +2,10 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import * as si from 'systeminformation';
 import dotenv from 'dotenv';
+import { metricsService } from './services/metrics';
+import metricsRouter from './routes/metrics';
+import healthRouter from './routes/health';
 
 dotenv.config();
 
@@ -17,102 +19,82 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3001;
+const UPDATE_INTERVAL = parseInt(process.env.UPDATE_INTERVAL || '5000');
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    instance: 'hatsune-dashboard-backend',
-    version: '0.1.0'
+// Routes
+app.use('/health', healthRouter);
+app.use('/api/metrics', metricsRouter);
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Hatsune Dashboard Backend',
+    version: '0.1.0',
+    description: 'Real-time system monitoring API',
+    endpoints: {
+      health: '/health',
+      metrics: '/api/metrics',
+      websocket: 'ws://localhost:' + PORT
+    }
   });
 });
 
-// Get current metrics
-app.get('/api/metrics', async (req, res) => {
-  try {
-    const [cpu, mem, disk] = await Promise.all([
-      si.currentLoad(),
-      si.mem(),
-      si.fsSize()
-    ]);
-
-    res.json({
-      timestamp: new Date().toISOString(),
-      cpu: {
-        usage: cpu.currentLoad,
-        cores: cpu.cpus?.length || 0
-      },
-      memory: {
-        total: mem.total,
-        used: mem.used,
-        free: mem.free,
-        percentage: ((mem.used / mem.total) * 100).toFixed(2)
-      },
-      disk: disk.map(d => ({
-        fs: d.fs,
-        size: d.size,
-        used: d.used,
-        available: d.available,
-        percentage: d.use
-      }))
-    });
-  } catch (error) {
-    console.error('Error fetching metrics:', error);
-    res.status(500).json({ error: 'Failed to fetch metrics' });
-  }
-});
-
-// Socket.io connection
+// WebSocket handling
 io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+  console.log('🔌 Client connected:', socket.id);
 
   // Send initial metrics
-  sendMetrics(socket);
+  emitMetrics(socket);
+
+  // Handle subscription requests
+  socket.on('subscribe', (channel: string) => {
+    console.log(`📡 Client ${socket.id} subscribed to: ${channel}`);
+    socket.join(channel);
+  });
+
+  socket.on('unsubscribe', (channel: string) => {
+    console.log(`📡 Client ${socket.id} unsubscribed from: ${channel}`);
+    socket.leave(channel);
+  });
 
   // Set up interval for real-time updates
   const interval = setInterval(() => {
-    sendMetrics(socket);
-  }, 5000); // Every 5 seconds
+    emitMetrics(socket);
+  }, UPDATE_INTERVAL);
 
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    console.log('🔌 Client disconnected:', socket.id);
     clearInterval(interval);
   });
 });
 
-async function sendMetrics(socket: any) {
+async function emitMetrics(socket: any) {
   try {
-    const [cpu, mem] = await Promise.all([
-      si.currentLoad(),
-      si.mem()
-    ]);
-
-    socket.emit('metrics', {
-      timestamp: new Date().toISOString(),
-      cpu: {
-        usage: cpu.currentLoad.toFixed(2),
-        cores: cpu.cpus?.length || 0
-      },
-      memory: {
-        total: mem.total,
-        used: mem.used,
-        free: mem.free,
-        percentage: ((mem.used / mem.total) * 100).toFixed(2)
-      }
-    });
+    const metrics = await metricsService.getAllMetrics();
+    
+    // Emit to specific client
+    socket.emit('metrics:update', metrics);
+    
+    // Also emit to 'metrics' room for broadcast subscriptions
+    socket.to('metrics').emit('metrics:update', metrics);
   } catch (error) {
-    console.error('Error sending metrics:', error);
+    console.error('❌ Error emitting metrics:', error);
+    socket.emit('error', { message: 'Failed to fetch metrics' });
   }
 }
 
+// Start server
 httpServer.listen(PORT, () => {
-  console.log(`🌑 Hatsune Dashboard Backend running on port ${PORT}`);
-  console.log(`💫 Ready for Hatsune Satu & Hatsune Dua collaboration!`);
+  console.log('🌑 Hatsune Dashboard Backend');
+  console.log(`💫 Running on port ${PORT}`);
+  console.log(`📊 Update interval: ${UPDATE_INTERVAL}ms`);
+  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+  console.log(`📈 Metrics API: http://localhost:${PORT}/api/metrics`);
+  console.log('✨ Ready for Hatsune Satu & Hatsune Dua collaboration!');
 });
 
 export default app;
